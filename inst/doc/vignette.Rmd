@@ -1,0 +1,393 @@
+---
+title: "studyStrap Package"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Introduction to studyStrap}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+The $\texttt{studyStrap}$ package implements multi-Study Learning algorithms such as Merging,  Study-Specific Ensembling (Trained-on-Observed-Studies Ensemble), the Study Strap, and the Covariate-Matched Study Strap. It calculates and applies Covariate Profile Similarity and Stacking weights. By training models within the $\texttt{caret}$ ecosystem, this package can flexibly apply different methods (e.g., random forests, linear regression, neural networks) as single-study learners within the multi-Study ensembling framework. The package allows for multiple single-study learners per study as well as custom functions for Covariate Profile Similarity weighting and for the accept/reject step utilized in the Covariate-Matched Study Strap. The prediction function allows use of this framework without having to manually ensemble and weight model predictions.
+
+\
+
+Below we offer a few basic examples using the core functions of the package. We begin by simulating a multi-study prediction setting.
+
+## Generate data and import packages
+
+```{r, warning=FALSE, comment=FALSE}
+set.seed(1)
+library(studyStrap)
+# create half of training dataset from 1 distribution
+X1 <- matrix(rnorm(2000), ncol = 2) # design matrix - 2 covariates
+B1 <- c(5, 10, 15) # true beta coefficients
+y1 <- cbind(1, X1) %*% B1
+
+# create 2nd half of training dataset from another distribution
+X2 <- matrix(rnorm(2000, 1,2), ncol = 2) # design matrix - 2 covariates
+B2 <- c(10, 5, 0) # true beta coefficients
+y2 <- cbind(1, X2) %*% B2
+
+X <- rbind(X1, X2)
+y <- c(y1, y2)
+
+study <- sample.int(10, 2000, replace = TRUE) # 10 studies
+data <- data.frame( Study = study, Y = y, V1 = X[,1], V2 = X[,2] )
+
+
+# create target study design matrix for covariate profile similarity weighting and 
+# accept/reject algorithm (Covariate-matched study strap)
+target <- matrix(rnorm(1000, 3, 5), ncol = 2) # design matrix
+colnames(target) <- c("V1", "V2")
+```
+
+
+## Structure of Data
+
+We have 10 studies (combined into a single dataframe), each with an outcome vector $\mathbf{Y}$ and two covariates $V1$ and $V2$.
+
+```{r}
+head(data)
+```
+
+
+\newpage 
+
+##Study-Specific Ensemble (Trained-on-Observed-Studies Ensemble)
+
+We begin with the basic ensembling setting (the Study-Specific Ensemble or Trained-on-Observed-Studies Ensemble) where we train one or more models on each study and then ensemble the models.
+
+###Study-Specific Ensemble with 1 SSL: Principal Component Regression
+
+Here we just use one single-study learner: PCR. We assume one has tuned the model to their liking and specifies the tuning parameters as they would in caret. Here we show an example of a custom function used for Covariate Profile Similarity weighting but we point out that this is not necessary.
+
+\
+
+Moreover, we specify a target study to allow for Covariate Profile Similarity weighting. This is unnecessary and we show an example without this below.
+
+```{r, warning=FALSE, comment=FALSE, message = FALSE}
+# custom function
+fn1 <- function(x1,x2){
+    return( abs( cor( colMeans(x1), colMeans(x2) )) )
+    } 
+
+sseMod1 <- sse(formula = Y ~., 
+               data = data, 
+               target.study = target,
+               ssl.method = list("pcr"), 
+               ssl.tuneGrid = list(data.frame("ncomp" = 1)), 
+               customFNs = list(fn1) )
+
+```
+
+### Make predictions with Study-Specific Ensemble (Trained-on-Observed-Studies Ensemble)
+
+```{r, warning=FALSE, comment=FALSE, warning=FALSE}
+preds <- studyStrap.predict(sseMod1, target)
+head(preds)[1:3,]
+```
+
+
+The predictions are a matrix here since we have default Covariate Profile Similarity measures, stacking weights and the custom weighting function we used. Notice that the custom weights are identical to those of the "Mean Corr" weights by design. The first column is a simple average of the predictions from all of the models.
+
+###Study-Specific Ensemble (Trained-on-Observed-Studies Ensemble) with 2 SSLs
+
+As above, we run the same algorithm but for each study, we now train a model on both linear regression and PCR.
+
+```{r, warning=FALSE, comment=FALSE, message = FALSE}
+# custom function
+fn1 <- function(x1,x2){
+    return( abs( cor( colMeans(x1), colMeans(x2) )) )
+    } 
+
+sseMod2 <- sse(formula = Y ~., 
+               data = data, 
+               target.study = target,
+               ssl.method = list("lm","pcr"), 
+               ssl.tuneGrid = list(NA, data.frame("ncomp" = 2)), 
+               customFNs = list(fn1) )
+
+```
+
+## Make predictions with Study-Specific Ensemble (Trained-on-Observed-Studies Ensemble) with 2 SSLs
+
+Making predictions is identical and produces output with identical structure. The function will automatically account for the fact that each study has a model trained on linear regression and a model trained on PCR. Covariate Profile Similarity weights account for these by weighting equally two models trained on the same data.
+
+```{r, warning=FALSE, comment=FALSE, warning=FALSE}
+preds <- studyStrap.predict(sseMod2, target)
+head(preds)[1:3,]
+```
+
+\
+
+Now let us assume we do not have a target study to generate Covariate Profile Similarity weights.
+
+\
+
+```{r, warning=FALSE, comment=FALSE, message = FALSE}
+sseMod3 <- sse(formula = Y ~., 
+               data = data,
+               ssl.method = list("pcr"), 
+               ssl.tuneGrid = list(NA, data.frame("ncomp" = 1)), 
+               sim.mets = FALSE)
+
+preds <- studyStrap.predict(sseMod3, target)
+head(preds)[1:3,]
+
+```
+
+\
+Since we do not have a target study we cannot generate Covariate Profile Similarity weights and predictions are only for stacking and simple averaging.
+
+\
+
+Now let us move on to another standard multi-study learning method, Merging:
+
+\newpage 
+
+##Merged Approach
+
+###Merged with 1 SSL and 2 SSLs
+
+```{r, warning=FALSE, comment=FALSE, message = FALSE}
+# 1 SSL
+mrgMod1 <- merged(formula = Y ~.,
+                  data = data,   
+                  ssl.method = list("pcr"), 
+                  ssl.tuneGrid = list( data.frame("ncomp" = 2))
+                  )
+
+# 2 SSLs
+mrgMod2 <- merged(formula = Y ~.,
+                  data = data,  
+                  ssl.method = list("lm","pcr"), 
+                  ssl.tuneGrid = list(NA, data.frame("ncomp" = 2))
+                  )
+
+```
+
+\
+
+Predictions only produce 1 vector of predictions listed under Avg.
+\
+
+```{r, warning=FALSE, comment=FALSE, warning=FALSE}
+preds <- studyStrap.predict(mrgMod2, target)
+head(preds)
+```
+
+\newpage
+
+##Study Strap
+We now demonstrate the use of the Study Strap with 10 straps and all available weighting schemes. 
+
+##Study Strap with 1 and 2 SSLs
+
+```{r, warning=FALSE, comment=FALSE, message = FALSE}
+# custom function
+fn1 <- function(x1,x2){
+    return( abs( cor( colMeans(x1), colMeans(x2) )) )
+    } 
+
+# 1 SSL
+ssMod1 <- ss(formula = Y ~.,
+             data = data,  
+             target.study = target,
+             bag.size = length(unique(data$Study)), 
+             straps = 10, 
+             stack = "standard",
+             sim.covs = NA, 
+             ssl.method = list("pcr"), 
+             ssl.tuneGrid = list(data.frame("ncomp" = 2)), 
+             sim.mets = TRUE,
+             model = TRUE, 
+             customFNs = list( fn1 ) )
+
+# 2 SSLs
+ssMod2 <- ss(formula = Y ~., 
+             data = data, 
+             target.study = target,
+             bag.size = length(unique(data$Study)), 
+             straps = 10, 
+             stack = "standard",
+             sim.covs = NA, 
+             ssl.method = list("lm","pcr"), 
+             ssl.tuneGrid = list(NA, data.frame("ncomp" = 2)), 
+             sim.mets = TRUE,
+             model = TRUE, 
+             customFNs = list( fn1 ) )
+```
+
+\
+
+Predictions have the same structure as the Study-Specific Ensemble.
+
+\
+
+```{r, warning=FALSE, comment=FALSE, warning=FALSE}
+preds <- studyStrap.predict(ssMod2, target)
+head(preds)[1:3,]
+```
+
+\
+
+Now let's say we do not want to use the custom similarity measures. We can turn these off and this will significantly improve the time it takes to fit the models and will alter the structure of the prediction output. We must specify the bag size. The default is to use the number of training studies, but this must be tuned for optimal performance.
+\
+
+
+```{r, warning=FALSE, comment=FALSE, message = FALSE}
+# custom function
+fn1 <- function(x1,x2){
+    return( abs( cor( colMeans(x1), colMeans(x2) )) )
+    } 
+
+ssMod3 <- ss(formula = Y ~., 
+             data = data, 
+             target.study = target,
+             bag.size = length(unique(data$Study)), 
+             straps = 10, 
+             sim.covs = NA, ssl.method = list("pcr"), 
+             ssl.tuneGrid = list(data.frame("ncomp" = 2)), 
+             sim.mets = FALSE,
+             customFNs = list( fn1 ) )
+
+preds <- studyStrap.predict(ssMod3, target)
+head(preds)[1:3,]
+```
+
+\
+
+Now, let's deal with the case when we do not have a target study at all. We can simply remove this argument and our predictions will be limited to a simple average and stacking weights.
+
+\
+
+```{r, warning=FALSE, comment=FALSE, message = FALSE}
+
+ssMod4 <- ss(formula = Y ~., 
+             data = data, 
+             bag.size = length(unique(data$Study)), 
+             straps = 10, 
+             sim.covs = NA, ssl.method = list("pcr"), 
+             ssl.tuneGrid = list(data.frame("ncomp" = 2)), 
+             sim.mets = FALSE)
+
+preds <- studyStrap.predict(ssMod4, target)
+head(preds)[1:3,]
+```
+
+\newpage 
+
+##Covariate-Matched Study Strap (Accept/Reject)
+
+Now we turn to the accept/reject algorithm. Here we must specify a target study. We need to specify the number of paths (we recommend 5) and the convergence limit (number of consecutive rejected study straps to meet convergence criteria). This depends on computational cost, but we would recommend at least 1000 and the more the better. Here we choose a low number for demonstration purposes. We could choose a custom function ( sim.fn ) for the accept/reject step or use the default of $|cor(\bar{x}^{(r)}, \bar{x}_{target}) |$. Similarly we can provide custom functions for weighting as above. We also specify the maximum number of study straps allowed in total in case many are accepted without convergence. We recommend 50 straps per path to be safe, but this is obviously application specific and depends on the distribution of the covariates. 
+
+\
+
+We could use 1 SSL or multiple SSLs as above. We need to specify the bag size as in the Study Strap algorithm. The default is to use the number of training studies, but this must be tuned for optimal performance.
+
+##Covariate-Matched Study Strap with 1 and 2 SSLs
+```{r, warning=FALSE, comment=FALSE, message = FALSE}
+# 1 SSL
+arMod1 <-  cmss(formula = Y ~., 
+                data = data, 
+                target.study = target,
+                converge.lim = 2,
+                bag.size = length(unique(data$Study)), 
+                max.straps = 50, 
+                paths = 2, 
+                ssl.method = list("pcr"), 
+                ssl.tuneGrid = list(data.frame("ncomp" = 2))
+                )
+
+# 2 SSLs
+arMod2 <-  cmss(formula = Y ~., 
+                data = data, 
+                target.study = target,
+                converge.lim = 2,
+                bag.size = length(unique(data$Study)), 
+                max.straps = 50, 
+                paths = 2, 
+                ssl.method = list("lm","pcr"), 
+                ssl.tuneGrid = list(NA, data.frame("ncomp" = 2))
+                )
+
+preds <- studyStrap.predict(arMod2, target)
+head(preds)[1:3,]
+```
+
+\
+
+Now let us use the accept/reject step based upon our own custom function (sim.fn). We turn off the default Covariate Profile Similarity weights to speed up runtime (sim.mets = FALSE) but provide 2 of our own custom functions for Covariate Profile Similarity weights.
+
+##Covariate-Matched Study Strap with Custom Function for Accept/Reject Step
+```{r, warning=FALSE, comment=FALSE, message = FALSE}
+# 1 SSL
+
+# custom function for CPS
+fn1 <- function(x1,x2){
+    return( abs( cor( colMeans(x1), colMeans(x2) )) )
+} 
+
+# custom function for Accept/Reject step criteria
+fn2 <- function(x1,x2){
+    return( sum ( ( colMeans(x1) - colMeans(x2) )^2 ) )
+    } 
+
+arMod3 <-  cmss(formula = Y ~., 
+                data = data, 
+                target.study = target,
+                converge.lim = 2,
+                bag.size = length(unique(data$Study)), 
+                max.straps = 50, 
+                paths = 2, 
+                ssl.method = list("pcr"), 
+                ssl.tuneGrid = list(data.frame("ncomp" = 2)),
+                sim.mets = FALSE,
+                sim.fn = fn2,
+                customFNs = list( fn1, fn2 ) 
+                )
+
+preds <- studyStrap.predict(arMod3, target)
+head(preds)[1:3,]
+```
+
+\newpage                 
+
+## Model Object Structure
+
+Now that we understand how to fit models, let us take a second to explore the model object that the package produces. The model objects are S3 classes. That is, they are functionally a list.
+
+```{r}
+sseMod1
+```
+
+Let us begin by exploring how the models are stored.
+
+### Models
+
+```{r}
+sseMod1$models
+```
+
+Models are organized as a list of lists. Each element in the primary list is itself a list of all the models trained on one single study learner (e.g., lm, random forests). Each element in that list is a model trained on a study/study strap. Here we have only one single study learner (PCR), so the list is of length 10. 
+
+
+###Model Info
+
+Model Info provides information about how the models were fit. These are stored based upon user input when fitting the model.
+
+```{r}
+names(sseMod1$modelInfo)
+```
+
+###Data Info
+
+Data Info provides information about the raw data that was fed to the model fitting functions. Original data is stored if "model = TRUE" is specified. 
+
+```{r}
+names(sseMod1$dataInfo)
+```
+
+###Similarity Matrix
+
+simMat provides the similarity matrix that is used for Covariate Profile Similarity weights.
